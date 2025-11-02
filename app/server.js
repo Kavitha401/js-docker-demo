@@ -1,80 +1,88 @@
 let express = require('express');
 let path = require('path');
 let fs = require('fs');
-let MongoClient = require('mongodb').MongoClient;
 let bodyParser = require('body-parser');
+let { MongoClient } = require('mongodb');
+
 let app = express();
 
-app.use(bodyParser.urlencoded({
-  extended: true
-}));
+app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-app.get('/', function (req, res) {
-    res.sendFile(path.join(__dirname, "index.html"));
-  });
+// ===== MongoDB Setup =====
+let mongoUrlLocal = "mongodb://admin:password@localhost:27017";
+let mongoClientOptions = { useNewUrlParser: true, useUnifiedTopology: true };
+let databaseName = "user-account";
 
-app.get('/profile-picture', function (req, res) {
+// ===== In-memory fallback =====
+let fakeDB = {
+  userid: 1,
+  name: "Guest",
+  email: "guest@example.com"
+};
+
+// ===== Routes =====
+
+// Serve main HTML
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
+// Serve image
+app.get('/profile-picture', (req, res) => {
   let img = fs.readFileSync(path.join(__dirname, "images/profile-1.jpg"));
-  res.writeHead(200, {'Content-Type': 'image/jpg' });
+  res.writeHead(200, { 'Content-Type': 'image/jpg' });
   res.end(img, 'binary');
 });
 
-// use when starting application locally
-let mongoUrlLocal = "mongodb://admin:password@localhost:27017";
-
-// use when starting application as docker container
-let mongoUrlDocker = "mongodb://admin:password@mongodb";
-
-// pass these options to mongo client connect request to avoid DeprecationWarning for current Server Discovery and Monitoring engine
-let mongoClientOptions = { useNewUrlParser: true, useUnifiedTopology: true };
-
-// "user-account" in demo with docker. "my-db" in demo with docker-compose
-let databaseName = "user-account";
-
-app.post('/update-profile', function (req, res) {
+// Update profile (DB or memory)
+app.post('/update-profile', async (req, res) => {
   let userObj = req.body;
+  userObj.userid = 1;
 
-  MongoClient.connect(mongoUrlLocal, mongoClientOptions, function (err, client) {
-    if (err) throw err;
+  try {
+    const client = await MongoClient.connect(mongoUrlLocal, mongoClientOptions);
+    const db = client.db(databaseName);
 
-    let db = client.db(databaseName);
-    userObj['userid'] = 1;
+    await db.collection("users").updateOne(
+      { userid: 1 },
+      { $set: userObj },
+      { upsert: true }
+    );
 
-    let myquery = { userid: 1 };
-    let newvalues = { $set: userObj };
+    client.close();
+    console.log("✅ Profile updated in MongoDB");
+  } catch (err) {
+    console.log("⚠️ MongoDB not reachable. Using in-memory store.");
+    fakeDB = { ...fakeDB, ...userObj };
+  }
 
-    db.collection("users").updateOne(myquery, newvalues, {upsert: true}, function(err, res) {
-      if (err) throw err;
-      client.close();
-    });
-
-  });
-  // Send response
   res.send(userObj);
 });
 
-app.get('/get-profile', function (req, res) {
-  let response = {};
-  // Connect to the db
-  MongoClient.connect(mongoUrlLocal, mongoClientOptions, function (err, client) {
-    if (err) throw err;
+// Get profile (DB or memory)
+app.get('/get-profile', async (req, res) => {
+  try {
+    const client = await MongoClient.connect(mongoUrlLocal, mongoClientOptions);
+    const db = client.db(databaseName);
 
-    let db = client.db(databaseName);
+    const result = await db.collection("users").findOne({ userid: 1 });
+    client.close();
 
-    let myquery = { userid: 1 };
-
-    db.collection("users").findOne(myquery, function (err, result) {
-      if (err) throw err;
-      response = result;
-      client.close();
-
-      // Send response
-      res.send(response ? response : {});
-    });
-  });
+    if (result) {
+      console.log("✅ Fetched profile from MongoDB");
+      res.send(result);
+    } else {
+      console.log("ℹ️ No profile found in DB. Sending default data.");
+      res.send(fakeDB);
+    }
+  } catch (err) {
+    console.log("⚠️ MongoDB not reachable. Sending in-memory data.");
+    res.send(fakeDB);
+  }
 });
 
-app.listen(3000, function () {
-  console.log("app listening on port 3000!");
+// Start server
+app.listen(3000, () => {
+  console.log("🚀 App listening on port 3000 (MongoDB optional mode)");
 });
